@@ -43,6 +43,12 @@ ul{color:var(--mut);font-size:.85rem;padding-left:18px;line-height:1.6;margin:20
 .bar>div{height:100%;width:0;background:#fff;transition:width .2s}
 #status{margin-top:14px;font-size:1.05rem;max-width:340px;min-height:2.6em}
 .small{width:auto;padding:12px 24px;background:rgba(0,0,0,.4);margin-top:12px}
+#installBanner{position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));max-width:420px;margin:0 auto;z-index:50;
+ background:#232834;border:1px solid #2f3645;border-radius:16px;padding:16px;box-shadow:0 10px 40px rgba(0,0,0,.6)}
+#installBanner b{display:block;font-size:1.05rem;margin-bottom:4px}
+#installBanner span{display:block;color:var(--mut);font-size:.9rem;line-height:1.45}
+.ib-btns{display:flex;gap:10px}
+.ib-btns button{margin-top:14px}
 </style>
 </head>
 <body>
@@ -59,7 +65,7 @@ ul{color:var(--mut);font-size:.85rem;padding-left:18px;line-height:1.6;margin:20
     <input type="number" id="reps" min="1" max="200" value="30">
     <button id="armBtn">Arm alarm</button>
     <button id="practiceBtn" class="ghost">Practice (test the camera, no alarm)</button>
-    <button id="installBtn" class="ghost hidden">Install as app</button>
+    <button id="installBtn" class="ghost">Install app</button>
     <div id="msg"></div>
     <ul>
       <li>Allow camera access when asked. Everything is analysed on your phone; no video is uploaded.</li>
@@ -75,6 +81,15 @@ ul{color:var(--mut);font-size:.85rem;padding-left:18px;line-height:1.6;margin:20
     <p class="sub" style="color:#ffb347">Set your phone's <b>media volume to MAX</b> now. A web page can't do it or lock it for you.</p>
     <button id="volBtn" style="margin-top:0">Test volume</button>
     <button class="ghost" id="cancelBtn">Cancel alarm</button>
+  </div>
+</div>
+
+<div id="installBanner" class="hidden" role="dialog" aria-label="Install app">
+  <b>Install Sit-Up Alarm?</b>
+  <span id="ibSub">Add it to your home screen so it opens like a normal app, even offline.</span>
+  <div class="ib-btns">
+    <button id="ibInstall">Install app</button>
+    <button id="ibLater" class="ghost">Not now</button>
   </div>
 </div>
 
@@ -335,13 +350,53 @@ function startSound(){
   vibTimer=setInterval(()=>{ if(navigator.vibrate) navigator.vibrate([300,100,300]); },800);
 }
 
-/* ---------- PWA ---------- */
+/* ---------- PWA install ---------- */
 if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
+const isStandalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone===true;
+const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+const DISMISS_KEY='situp-install-dismissed';
 let deferredInstall=null;
-window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstall=e;$('installBtn').classList.remove('hidden');});
-$('installBtn').onclick=async()=>{ if(!deferredInstall) return; deferredInstall.prompt(); await deferredInstall.userChoice; deferredInstall=null; $('installBtn').classList.add('hidden'); };
-window.addEventListener('appinstalled',()=>$('installBtn').classList.add('hidden'));
-if(/iphone|ipad/i.test(navigator.userAgent) && !navigator.standalone) setMsg('iPhone: tap Share, then "Add to Home Screen" to install.');
+
+const dismissedRecently=()=>{ try{ return Date.now()-Number(localStorage.getItem(DISMISS_KEY)||0) < 7*864e5; }catch(e){ return false; } };
+function showBanner(){ if(!isStandalone && !dismissedRecently()) $('installBanner').classList.remove('hidden'); }
+function hideBanner(remember){
+  $('installBanner').classList.add('hidden');
+  if(remember){ try{localStorage.setItem(DISMISS_KEY,String(Date.now()));}catch(e){} }
+}
+function showManualSteps(){
+  $('installBanner').classList.remove('hidden');
+  $('ibSub').textContent = isIOS
+    ? 'Tap the Share button in Safari, then choose "Add to Home Screen".'
+    : 'Open your browser menu (the three dots) and choose "Install app" or "Add to Home screen".';
+  $('ibInstall').classList.add('hidden');
+  $('ibLater').textContent='Got it';
+}
+async function doInstall(){
+  if(deferredInstall){                       // one tap: browser's own confirm dialog, then it installs by itself
+    const ev=deferredInstall; deferredInstall=null;
+    ev.prompt();
+    const choice=await ev.userChoice;
+    hideBanner(choice.outcome!=='accepted');
+    if(choice.outcome==='accepted') setMsg('Installing… look for Sit-Up Alarm on your home screen.');
+  }else{
+    showManualSteps();                       // iPhone / browsers without an install prompt
+  }
+}
+
+if(isStandalone){ $('installBtn').classList.add('hidden'); }
+else if(isIOS){ setTimeout(showBanner,1200); }             // iOS has no install event, so we show the steps
+
+window.addEventListener('beforeinstallprompt',e=>{
+  e.preventDefault(); deferredInstall=e;
+  setTimeout(showBanner,800);                               // ask once the page has loaded
+});
+window.addEventListener('appinstalled',()=>{
+  deferredInstall=null; hideBanner(false); $('installBtn').classList.add('hidden');
+  setMsg('Installed! Open Sit-Up Alarm from your home screen.');
+});
+$('ibInstall').onclick=doInstall;
+$('installBtn').onclick=doInstall;
+$('ibLater').onclick=()=>hideBanner(true);
 
 /* ---------- friction while ringing ---------- */
 window.addEventListener('beforeunload',e=>{ if(ringing&&!practice){e.preventDefault();e.returnValue='';} });
