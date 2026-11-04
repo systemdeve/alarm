@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>Sit-Up Alarm</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Sit-Up Alarm">
+<style>
+:root{--bg:#0f1115;--card:#181b22;--fg:#f2f4f8;--mut:#8b93a5;--acc:#ff5a36}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;min-height:100vh;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;display:flex;align-items:center;justify-content:center;padding:16px}
+.card{width:100%;max-width:420px;background:var(--card);border-radius:20px;padding:24px;box-shadow:0 10px 40px rgba(0,0,0,.4)}
+h1{margin:0 0 4px;font-size:1.5rem}
+p.sub{margin:0 0 16px;color:var(--mut);font-size:.95rem}
+label{display:block;font-size:.85rem;color:var(--mut);margin:14px 0 6px}
+input{width:100%;padding:14px;font-size:1.4rem;border-radius:12px;border:1px solid #2a2f3a;background:#0f1115;color:var(--fg)}
+button{width:100%;margin-top:16px;padding:16px;font-size:1.1rem;font-weight:600;border:0;border-radius:12px;background:var(--acc);color:#fff;cursor:pointer}
+button:disabled{opacity:.6}
+button.ghost{background:transparent;border:1px solid #2a2f3a;color:var(--mut);margin-top:10px}
+ul{color:var(--mut);font-size:.85rem;padding-left:18px;line-height:1.6;margin:20px 0 0}
+.clock{font-size:3rem;font-weight:700;text-align:center;margin:8px 0}
+.center{text-align:center}
+.hidden{display:none!important}
+#msg{color:#ffb347;font-size:.85rem;margin-top:12px;min-height:1em}
+
+#overlay{position:fixed;inset:0;z-index:99;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:16px;
+ background:#b3001b;animation:pulse .7s infinite alternate;user-select:none;-webkit-user-select:none;touch-action:none;overflow:auto}
+@keyframes pulse{from{background:#b3001b}to{background:#ff3b1f}}
+#overlay.done{animation:none;background:#0b6b3a}
+#overlay.practice{animation:none;background:#1c3a63}
+.cam{position:relative;width:min(92vw,420px);border-radius:14px;overflow:hidden;background:#000;margin:8px 0}
+.cam video,.cam canvas{width:100%;display:block}
+.cam canvas{position:absolute;inset:0;height:100%}
+.count{font-size:4.5rem;font-weight:800;line-height:1}
+.of{font-size:1.2rem;opacity:.85;margin-bottom:10px}
+.bar{width:80%;max-width:360px;height:12px;border-radius:6px;background:rgba(0,0,0,.35);overflow:hidden}
+.bar>div{height:100%;width:0;background:#fff;transition:width .2s}
+#status{margin-top:14px;font-size:1.05rem;max-width:340px;min-height:2.6em}
+.small{width:auto;padding:12px 24px;background:rgba(0,0,0,.4);margin-top:12px}
+</style>
+</head>
+<body>
+
+<div class="card" id="setup">
+  <h1>Sit-Up Alarm</h1>
+  <p class="sub">The camera opens when the alarm rings and counts your sit-ups. The alarm only stops at your target.</p>
+  <div class="center clock" id="now">--:--:--</div>
+
+  <div id="setForm">
+    <label for="time">Wake-up time</label>
+    <input type="time" id="time">
+    <label for="reps">Sit-ups required</label>
+    <input type="number" id="reps" min="1" max="200" value="30">
+    <button id="armBtn">Arm alarm</button>
+    <button id="practiceBtn" class="ghost">Practice (test the camera, no alarm)</button>
+    <button id="installBtn" class="ghost hidden">Install as app</button>
+    <div id="msg"></div>
+    <ul>
+      <li>Allow camera access when asked. Everything is analysed on your phone; no video is uploaded.</li>
+      <li>Prop the phone on the floor about 2 m away, screen facing you, so the camera sees your whole body <b>from the side</b>.</li>
+      <li>Keep this page open, phone plugged in, screen on, volume up. Open it over HTTPS.</li>
+      <li>The camera stays on from the moment you arm the alarm, so it's ready instantly.</li>
+    </ul>
+  </div>
+
+  <div id="armed" class="hidden center">
+    <p class="sub" id="armedText"></p>
+    <p class="sub" id="countdown"></p>
+    <p class="sub" style="color:#ffb347">Set your phone's <b>media volume to MAX</b> now. A web page can't do it or lock it for you.</p>
+    <button id="volBtn" style="margin-top:0">Test volume</button>
+    <button class="ghost" id="cancelBtn">Cancel alarm</button>
+  </div>
+</div>
+
+<div id="overlay" class="hidden">
+  <div id="title" style="font-size:1.4rem;font-weight:700">WAKE UP — SIT UPS!</div>
+  <div class="cam"><video id="cam" playsinline muted autoplay></video><canvas id="cv"></canvas></div>
+  <div class="count" id="count">0</div>
+  <div class="of" id="of">of 30</div>
+  <div class="bar"><div id="fill"></div></div>
+  <div id="status"></div>
+  <button id="testBtn" class="small hidden">+1 rep (test)</button>
+  <button id="tapBtn" class="small hidden">Camera failed: tap to count a rep</button>
+  <button id="exitBtn" class="small hidden">Exit practice</button>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const KEY = 'situp-alarm-camera-pending';
+const MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+const VISION = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+
+// ---- tuning: torso angle above the floor (0° = lying flat, 90° = upright) ----
+const UP_DEG = 55;     // counts as "sat up" above this
+const DOWN_DEG = 30;   // counts as "lying down" below this
+const MIN_UP_MS = 300, MIN_REP_MS = 1000;
+
+let audioCtx=null, wakeLock=null, checkTimer=null, beepTimer=null, vibTimer=null;
+let landmarker=null, stream=null;
+let alarmAt=0, target=30, reps=0, ringing=false, practice=false, camOK=false;
+let state='waiting', elev=null, upT=0, lastRepT=0, lastDet=0, lastMsgT=0;
+const TEST = location.hash==='#test';
+const pad=n=>String(n).padStart(2,'0');
+const setStatus=t=>$('status').textContent=t;
+const setMsg=t=>$('msg').textContent=t;
+
+setInterval(()=>{const d=new Date();$('now').textContent=pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds());},500);
+try{const p=JSON.parse(localStorage.getItem(KEY)||'null');
+  if(p){const d=new Date(p.at);$('time').value=pad(d.getHours())+':'+pad(d.getMinutes());$('reps').value=p.target;}}catch(e){}
+
+/* ---------- get camera + model + sound ready ---------- */
+async function openCamera(){
+  stream = await navigator.mediaDevices.getUserMedia({
+    video:{facingMode:'user',width:{ideal:640},height:{ideal:480}}, audio:false});
+  const v=$('cam'); v.srcObject=stream; await v.play().catch(()=>{});
+}
+async function loadModel(){
+  if(landmarker) return;
+  const vision = await import(VISION+'/vision_bundle.mjs');
+  const fileset = await vision.FilesetResolver.forVisionTasks(VISION+'/wasm');
+  const opts = d=>({baseOptions:{modelAssetPath:MODEL,delegate:d},runningMode:'VIDEO',numPoses:1});
+  try{ landmarker = await vision.PoseLandmarker.createFromOptions(fileset,opts('GPU')); }
+  catch(e){ landmarker = await vision.PoseLandmarker.createFromOptions(fileset,opts('CPU')); }
+}
+async function getWakeLock(){ try{ if('wakeLock' in navigator) wakeLock=await navigator.wakeLock.request('screen'); }catch(e){} }
+
+async function prepare(btn){
+  const label=btn.textContent; btn.disabled=true;
+  try{
+    btn.textContent='Opening camera…';
+    await openCamera();
+    audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
+    await audioCtx.resume();
+    btn.textContent='Loading pose model…';
+    await loadModel();
+    await getWakeLock();
+    return true;
+  }catch(e){
+    setMsg('Could not start: '+(e.message||e)+'. Check camera permission and that the page is on HTTPS.');
+    stopCamera();
+    return false;
+  }finally{ btn.disabled=false; btn.textContent=label; }
+}
+function stopCamera(){ if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;} $('cam').srcObject=null; }
+
+/* ---------- arm / practice ---------- */
+$('armBtn').onclick = async () => {
+  const t=$('time').value; if(!t){setMsg('Pick a wake-up time first.');return;}
+  target=Math.max(1,parseInt($('reps').value)||30);
+  setMsg('');
+  if(!await prepare($('armBtn'))) return;
+
+  let pending=null; try{pending=JSON.parse(localStorage.getItem(KEY)||'null');}catch(e){}
+  const [h,m]=t.split(':').map(Number);
+  const d=new Date(); d.setHours(h,m,0,0);
+  if(pending && pending.at<=Date.now() && pending.target===target) alarmAt=pending.at;  // reloaded after alarm time: ring again
+  else { if(d.getTime()<=Date.now()) d.setDate(d.getDate()+1); alarmAt=d.getTime(); }
+  try{localStorage.setItem(KEY,JSON.stringify({at:alarmAt,target}));}catch(e){}
+
+  $('setForm').classList.add('hidden'); $('armed').classList.remove('hidden');
+  $('armedText').textContent='Alarm set for '+new Date(alarmAt).toLocaleString([],{weekday:'short',hour:'2-digit',minute:'2-digit'})+' · '+target+' sit-ups';
+  clearInterval(checkTimer); checkTimer=setInterval(tick,500); tick();
+};
+$('practiceBtn').onclick = async () => {
+  target=Math.max(1,parseInt($('reps').value)||30); setMsg('');
+  if(!await prepare($('practiceBtn'))) return;
+  ring(true);
+};
+function tick(){
+  const left=alarmAt-Date.now();
+  if(left<=0){clearInterval(checkTimer);ring(false);return;}
+  $('countdown').textContent='Rings in '+Math.floor(left/3600000)+'h '+Math.floor(left%3600000/60000)+'m';
+}
+$('volBtn').onclick=testVolume;
+$('cancelBtn').onclick=()=>{
+  if(ringing) return;
+  clearInterval(checkTimer); alarmAt=0; stopCamera();
+  try{localStorage.removeItem(KEY);}catch(e){}
+  if(wakeLock){wakeLock.release().catch(()=>{});wakeLock=null;}
+  $('armed').classList.add('hidden'); $('setForm').classList.remove('hidden');
+};
+document.addEventListener('visibilitychange',async()=>{
+  if(document.visibilityState!=='visible') return;
+  if(alarmAt||ringing) getWakeLock();
+  if(ringing && audioCtx) audioCtx.resume();
+  if((alarmAt||ringing) && (!stream||!stream.active)){ try{await openCamera();}catch(e){} }
+  if(alarmAt && !ringing) tick();
+});
+
+/* ---------- ringing ---------- */
+async function ring(isPractice){
+  ringing=true; practice=isPractice; reps=0; state='waiting'; elev=null; lastRepT=0;
+  const ov=$('overlay');
+  ov.classList.remove('hidden','done'); ov.classList.toggle('practice',practice);
+  $('title').textContent = practice ? 'PRACTICE MODE' : 'WAKE UP — SIT UPS!';
+  $('exitBtn').classList.toggle('hidden',!practice);
+  $('testBtn').classList.toggle('hidden',!TEST);
+  $('tapBtn').classList.add('hidden');
+  render(); setStatus('Opening camera…');
+  try{ document.documentElement.requestFullscreen && document.documentElement.requestFullscreen(); }catch(e){}
+  if(!practice) startSound();
+
+  camOK=false;
+  try{
+    if(!stream||!stream.active) await openCamera();
+    if(!landmarker) await loadModel();
+    const v=$('cam'); await v.play().catch(()=>{});
+    $('cv').width=v.videoWidth||640; $('cv').height=v.videoHeight||480;
+    camOK=true; setStatus('Lie down so the camera sees you from the side.');
+    requestAnimationFrame(loop);
+  }catch(e){
+    setStatus('Camera could not start. Tap the button to count each rep.');
+    $('tapBtn').classList.remove('hidden');
+  }
+}
+
+function loop(){
+  if(!ringing||!camOK) return;
+  const v=$('cam'), now=performance.now();
+  if(v.readyState>=2 && now-lastDet>66){
+    lastDet=now;
+    try{ handlePose(landmarker.detectForVideo(v,now), v); }catch(e){}
+  }
+  requestAnimationFrame(loop);
+}
+
+function handlePose(r, v){
+  const cv=$('cv'), ctx=cv.getContext('2d');
+  if(cv.width!==v.videoWidth&&v.videoWidth){cv.width=v.videoWidth;cv.height=v.videoHeight;}
+  ctx.clearRect(0,0,cv.width,cv.height);
+  const lm=r.landmarks && r.landmarks[0];
+  if(!lm){ hint('Cannot see you. Put the phone on the floor, side view, whole body in frame.'); return; }
+
+  const L=[11,23,25], R=[12,24,26];                      // shoulder, hip, knee
+  const vis=ix=>Math.min(...ix.map(i=>lm[i].visibility??0));
+  const ix = vis(L)>=vis(R) ? L : R;
+  if(vis(ix)<0.4){ hint('Move back a little so shoulder, hip and knee are all visible.'); return; }
+
+  const sh=lm[ix[0]], hp=lm[ix[1]], kn=lm[ix[2]], W=cv.width, H=cv.height;
+  const raw=Math.atan2(Math.abs((sh.y-hp.y)*H), Math.abs((sh.x-hp.x)*W))*180/Math.PI;
+  elev = elev==null ? raw : elev*0.6+raw*0.4;
+
+  // draw skeleton
+  ctx.lineWidth=5; ctx.strokeStyle='#00ff9c'; ctx.fillStyle='#fff';
+  ctx.beginPath(); ctx.moveTo(sh.x*W,sh.y*H); ctx.lineTo(hp.x*W,hp.y*H); ctx.lineTo(kn.x*W,kn.y*H); ctx.stroke();
+  [sh,hp,kn].forEach(p=>{ctx.beginPath();ctx.arc(p.x*W,p.y*H,7,0,7);ctx.fill();});
+
+  const now=performance.now();
+  if(state==='waiting'){
+    if(elev<DOWN_DEG){ state='down'; setStatus('Ready. Start your sit-ups!'); }
+    else hint('Lie down on your back first.');
+  }else if(state==='down'){
+    if(elev>UP_DEG){ state='up'; upT=now; }
+  }else if(state==='up'){
+    if(elev<DOWN_DEG){
+      state='down';
+      if(now-upT>MIN_UP_MS && now-lastRepT>MIN_REP_MS){ lastRepT=now; addRep(); }
+    }
+  }
+}
+function hint(t){ const n=performance.now(); if(n-lastMsgT>800){ setStatus(t); lastMsgT=n; } }
+
+function render(){
+  $('count').textContent=reps; $('of').textContent='of '+target;
+  $('fill').style.width=Math.min(100,reps/target*100)+'%';
+}
+function addRep(){
+  reps++; render(); beep(1600,0.08);
+  if(navigator.vibrate) navigator.vibrate(40);
+  if(reps<target) setStatus(reps+' done, '+(target-reps)+' to go!');
+  if(reps>=target) finish();
+}
+$('testBtn').onclick=addRep; $('tapBtn').onclick=addRep;
+if(TEST) document.addEventListener('keydown',e=>{if(e.code==='Space'&&ringing)addRep();});
+
+function stopAll(){
+  ringing=false; camOK=false;
+  clearInterval(beepTimer); clearInterval(vibTimer);
+  if(navigator.vibrate) navigator.vibrate(0);
+}
+function closeOverlay(){
+  $('overlay').classList.add('hidden'); $('overlay').onclick=null;
+  stopCamera();
+  if(document.fullscreenElement) document.exitFullscreen();
+  if(wakeLock){wakeLock.release().catch(()=>{});wakeLock=null;}
+  $('armed').classList.add('hidden'); $('setForm').classList.remove('hidden');
+}
+function finish(){
+  stopAll();
+  if(!practice){ alarmAt=0; try{localStorage.removeItem(KEY);}catch(e){} }
+  $('overlay').classList.remove('practice'); $('overlay').classList.add('done');
+  $('title').textContent = practice ? 'PRACTICE COMPLETE' : 'DONE — GOOD MORNING!';
+  setStatus('Tap anywhere to close.');
+  $('testBtn').classList.add('hidden'); $('tapBtn').classList.add('hidden'); $('exitBtn').classList.add('hidden');
+  setTimeout(()=>{ $('overlay').onclick=closeOverlay; },600);
+}
+$('exitBtn').onclick=e=>{ e.stopPropagation(); stopAll(); closeOverlay(); };
+
+/* ---------- sound ---------- */
+let master=null;
+function getMaster(){            // compressor + boost = maximum loudness the page can produce
+  if(master) return master;
+  const comp=audioCtx.createDynamicsCompressor();
+  comp.threshold.value=-30; comp.knee.value=0; comp.ratio.value=20;
+  comp.attack.value=0.001; comp.release.value=0.05;
+  const boost=audioCtx.createGain(); boost.gain.value=1.4;
+  comp.connect(boost); boost.connect(audioCtx.destination);
+  master=comp; return master;
+}
+function beep(freq,dur){
+  if(!audioCtx) return;
+  const t=audioCtx.currentTime, out=getMaster();
+  [['square',1],['sawtooth',1.5],['square',2]].forEach(([type,mult])=>{   // layered tones are louder and harsher
+    const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.type=type; o.frequency.value=freq*mult;
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(0.9,t+0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+    o.connect(g); g.connect(out); o.start(t); o.stop(t+dur+0.02);
+  });
+}
+function testVolume(){
+  if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  audioCtx.resume(); beep(1175,0.4); setTimeout(()=>beep(880,0.4),450);
+}
+function startSound(){
+  let i=0;
+  beepTimer=setInterval(()=>{ if(audioCtx.state!=='running') audioCtx.resume(); beep(i%2?880:1175,0.22); i++; },350);
+  vibTimer=setInterval(()=>{ if(navigator.vibrate) navigator.vibrate([300,100,300]); },800);
+}
+
+/* ---------- PWA ---------- */
+if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
+let deferredInstall=null;
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstall=e;$('installBtn').classList.remove('hidden');});
+$('installBtn').onclick=async()=>{ if(!deferredInstall) return; deferredInstall.prompt(); await deferredInstall.userChoice; deferredInstall=null; $('installBtn').classList.add('hidden'); };
+window.addEventListener('appinstalled',()=>$('installBtn').classList.add('hidden'));
+if(/iphone|ipad/i.test(navigator.userAgent) && !navigator.standalone) setMsg('iPhone: tap Share, then "Add to Home Screen" to install.');
+
+/* ---------- friction while ringing ---------- */
+window.addEventListener('beforeunload',e=>{ if(ringing&&!practice){e.preventDefault();e.returnValue='';} });
+document.addEventListener('contextmenu',e=>{ if(ringing&&!practice) e.preventDefault(); });
+</script>
+</body>
+</html>
