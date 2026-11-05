@@ -7,7 +7,7 @@
 <title>Sit-Up Alarm</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-512.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Sit-Up Alarm">
@@ -55,13 +55,13 @@ ul{color:var(--mut);font-size:.85rem;padding-left:18px;line-height:1.6;margin:20
 
 <div class="card" id="setup">
   <h1>Sit-Up Alarm</h1>
-  <p class="sub">The camera opens when the alarm rings and counts your sit-ups. The alarm only stops at your target.</p>
+  <p class="sub">The camera opens when the alarm rings and counts your squats. The alarm only stops at your target.</p>
   <div class="center clock" id="now">--:--:--</div>
 
   <div id="setForm">
     <label for="time">Wake-up time</label>
     <input type="time" id="time">
-    <label for="reps">Sit-ups required</label>
+    <label for="reps">Squats required</label>
     <input type="number" id="reps" min="1" max="200" value="30">
     <button id="armBtn">Arm alarm</button>
     <button id="practiceBtn" class="ghost">Practice (test the camera, no alarm)</button>
@@ -69,7 +69,7 @@ ul{color:var(--mut);font-size:.85rem;padding-left:18px;line-height:1.6;margin:20
     <div id="msg"></div>
     <ul>
       <li>Allow camera access when asked. Everything is analysed on your phone; no video is uploaded.</li>
-      <li>Prop the phone on the floor about 2 m away, screen facing you, so the camera sees your whole body <b>from the side</b>.</li>
+      <li>Prop the phone upright about 2 m away, screen facing you, so the camera sees you <b>head-on</b> from head to knees. Stand tall facing it and hold still for a second, then squat down and stand back up. Counting only starts when you face the camera.</li>
       <li>Keep this page open, phone plugged in, screen on, volume up. Open it over HTTPS.</li>
       <li>The camera stays on from the moment you arm the alarm, so it's ready instantly.</li>
     </ul>
@@ -94,12 +94,13 @@ ul{color:var(--mut);font-size:.85rem;padding-left:18px;line-height:1.6;margin:20
 </div>
 
 <div id="overlay" class="hidden">
-  <div id="title" style="font-size:1.4rem;font-weight:700">WAKE UP — SIT UPS!</div>
+  <div id="title" style="font-size:1.4rem;font-weight:700">WAKE UP — SQUATS!</div>
   <div class="cam"><video id="cam" playsinline muted autoplay></video><canvas id="cv"></canvas></div>
   <div class="count" id="count">0</div>
   <div class="of" id="of">of 30</div>
   <div class="bar"><div id="fill"></div></div>
   <div id="status"></div>
+  <div id="dbg" class="hidden" style="margin-top:8px;font:600 .85rem ui-monospace,Menlo,monospace;background:rgba(0,0,0,.45);padding:6px 12px;border-radius:8px"></div>
   <button id="testBtn" class="small hidden">+1 rep (test)</button>
   <button id="tapBtn" class="small hidden">Camera failed: tap to count a rep</button>
   <button id="exitBtn" class="small hidden">Exit practice</button>
@@ -111,15 +112,16 @@ const KEY = 'situp-alarm-camera-pending';
 const MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
 const VISION = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
 
-// ---- tuning: torso angle above the floor (0° = lying flat, 90° = upright) ----
-const UP_DEG = 55;     // counts as "sat up" above this
-const DOWN_DEG = 30;   // counts as "lying down" below this
+// ---- tuning (standing squats, front view): ratio = thigh height / torso height (hip->knee vs shoulder->hip) ----
+const STAND_MIN = 0.45; // must be above this to count as standing upright
+const SQUAT_FRAC = 0.6; // squatted when ratio drops below (standing baseline x this)
+const STAND_FRAC = 0.85;// stood back up when ratio returns above (baseline x this)
 const MIN_UP_MS = 300, MIN_REP_MS = 1000;
 
 let audioCtx=null, wakeLock=null, checkTimer=null, beepTimer=null, vibTimer=null;
 let landmarker=null, stream=null;
 let alarmAt=0, target=30, reps=0, ringing=false, practice=false, camOK=false;
-let state='waiting', elev=null, upT=0, lastRepT=0, lastDet=0, lastMsgT=0;
+let state='waiting', ratio=null, base=null, stableN=0, upT=0, lastRepT=0, lastDet=0, lastMsgT=0;
 const TEST = location.hash==='#test';
 const pad=n=>String(n).padStart(2,'0');
 const setStatus=t=>$('status').textContent=t;
@@ -179,7 +181,7 @@ $('armBtn').onclick = async () => {
   try{localStorage.setItem(KEY,JSON.stringify({at:alarmAt,target}));}catch(e){}
 
   $('setForm').classList.add('hidden'); $('armed').classList.remove('hidden');
-  $('armedText').textContent='Alarm set for '+new Date(alarmAt).toLocaleString([],{weekday:'short',hour:'2-digit',minute:'2-digit'})+' · '+target+' sit-ups';
+  $('armedText').textContent='Alarm set for '+new Date(alarmAt).toLocaleString([],{weekday:'short',hour:'2-digit',minute:'2-digit'})+' · '+target+' squats';
   clearInterval(checkTimer); checkTimer=setInterval(tick,500); tick();
 };
 $('practiceBtn').onclick = async () => {
@@ -210,13 +212,14 @@ document.addEventListener('visibilitychange',async()=>{
 
 /* ---------- ringing ---------- */
 async function ring(isPractice){
-  ringing=true; practice=isPractice; reps=0; state='waiting'; elev=null; lastRepT=0;
+  ringing=true; practice=isPractice; reps=0; state='waiting'; ratio=null; base=null; stableN=0; lastRepT=0;
   const ov=$('overlay');
   ov.classList.remove('hidden','done'); ov.classList.toggle('practice',practice);
   $('title').textContent = practice ? 'PRACTICE MODE' : 'WAKE UP — SIT UPS!';
   $('exitBtn').classList.toggle('hidden',!practice);
   $('testBtn').classList.toggle('hidden',!TEST);
   $('tapBtn').classList.add('hidden');
+  $('dbg').classList.toggle('hidden',!(practice||TEST)); $('dbg').textContent='';
   render(); setStatus('Opening camera…');
   try{ document.documentElement.requestFullscreen && document.documentElement.requestFullscreen(); }catch(e){}
   if(!practice) startSound();
@@ -227,7 +230,7 @@ async function ring(isPractice){
     if(!landmarker) await loadModel();
     const v=$('cam'); await v.play().catch(()=>{});
     $('cv').width=v.videoWidth||640; $('cv').height=v.videoHeight||480;
-    camOK=true; setStatus('Lie down so the camera sees you from the side.');
+    camOK=true; setStatus('Stand facing the camera, whole body in view.');
     requestAnimationFrame(loop);
   }catch(e){
     setStatus('Camera could not start. Tap the button to count each rep.');
@@ -250,31 +253,44 @@ function handlePose(r, v){
   if(cv.width!==v.videoWidth&&v.videoWidth){cv.width=v.videoWidth;cv.height=v.videoHeight;}
   ctx.clearRect(0,0,cv.width,cv.height);
   const lm=r.landmarks && r.landmarks[0];
-  if(!lm){ hint('Cannot see you. Put the phone on the floor, side view, whole body in frame.'); return; }
+  if(!lm){ hint('Cannot see you. Stand back so your whole body, head to knees, is in view.'); stableN=0; return; }
 
-  const L=[11,23,25], R=[12,24,26];                      // shoulder, hip, knee
-  const vis=ix=>Math.min(...ix.map(i=>lm[i].visibility??0));
-  const ix = vis(L)>=vis(R) ? L : R;
-  if(vis(ix)<0.4){ hint('Move back a little so shoulder, hip and knee are all visible.'); return; }
-
-  const sh=lm[ix[0]], hp=lm[ix[1]], kn=lm[ix[2]], W=cv.width, H=cv.height;
-  const raw=Math.atan2(Math.abs((sh.y-hp.y)*H), Math.abs((sh.x-hp.x)*W))*180/Math.PI;
-  elev = elev==null ? raw : elev*0.6+raw*0.4;
+  const W=cv.width, H=cv.height;
+  const ls=lm[11], rs=lm[12], lh=lm[23], rh=lm[24], lk=lm[25], rk=lm[26], nose=lm[0];
+  if(Math.min(...[0,11,12,23,24,25,26].map(i=>lm[i].visibility??0))<0.4){
+    hint('Step back so your head, shoulders, hips and knees are all visible.'); stableN=0; return; }
 
   // draw skeleton
   ctx.lineWidth=5; ctx.strokeStyle='#00ff9c'; ctx.fillStyle='#fff';
-  ctx.beginPath(); ctx.moveTo(sh.x*W,sh.y*H); ctx.lineTo(hp.x*W,hp.y*H); ctx.lineTo(kn.x*W,kn.y*H); ctx.stroke();
-  [sh,hp,kn].forEach(p=>{ctx.beginPath();ctx.arc(p.x*W,p.y*H,7,0,7);ctx.fill();});
+  ctx.beginPath(); ctx.moveTo(ls.x*W,ls.y*H); ctx.lineTo(rs.x*W,rs.y*H); ctx.lineTo(rh.x*W,rh.y*H); ctx.lineTo(lh.x*W,lh.y*H); ctx.closePath(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(lh.x*W,lh.y*H); ctx.lineTo(lk.x*W,lk.y*H); ctx.moveTo(rh.x*W,rh.y*H); ctx.lineTo(rk.x*W,rk.y*H); ctx.stroke();
+  [ls,rs,lh,rh,lk,rk,nose].forEach(p=>{ctx.beginPath();ctx.arc(p.x*W,p.y*H,7,0,7);ctx.fill();});
 
+  // must face the camera: shoulders clearly apart, left shoulder on the image's right, nose between them
+  const shW=Math.abs(ls.x-rs.x)*W, tol=shW*0.15;
+  const facing = ls.x>rs.x && shW>0.07*W && nose.x>rs.x-tol && nose.x<ls.x+tol;
+  if(!facing){ hint('Face the camera: stand front-on, feet shoulder-width apart.'); stableN=0; base=null; state='waiting'; return; }
+
+  const torso=((lh.y+rh.y)/2-(ls.y+rs.y)/2)*H;
+  const thigh=((lk.y+rk.y)/2-(lh.y+rh.y)/2)*H;
+  if(torso<=1){ hint('Stand upright facing the camera.'); stableN=0; return; }
+  const raw=thigh/torso;
+  ratio = ratio==null ? raw : ratio*0.6+raw*0.4;
+
+  if(practice||TEST) $('dbg').textContent='ratio '+ratio.toFixed(2)+' | stand '+(base==null?'--':base.toFixed(2))+' | squat below '+(base==null?'--':(base*SQUAT_FRAC).toFixed(2))+' | '+state;
   const now=performance.now();
   if(state==='waiting'){
-    if(elev<DOWN_DEG){ state='down'; setStatus('Ready. Start your sit-ups!'); }
-    else hint('Lie down on your back first.');
-  }else if(state==='down'){
-    if(elev>UP_DEG){ state='up'; upT=now; }
-  }else if(state==='up'){
-    if(elev<DOWN_DEG){
-      state='down';
+    if(ratio>=STAND_MIN){
+      base = base==null ? ratio : base*0.9+ratio*0.1;
+      if(++stableN>=15){ state='stand'; setStatus('Ready. Start your squats!'); }
+      else hint('Stand tall and hold still for a second…');
+    }else{ stableN=0; base=null; hint('Stand up straight first.'); }
+  }else if(state==='stand'){
+    if(ratio>base*STAND_FRAC) base=base*0.98+ratio*0.02;      // follow slow drift while standing
+    if(ratio<base*SQUAT_FRAC){ state='squat'; upT=now; }
+  }else if(state==='squat'){
+    if(ratio>base*STAND_FRAC){
+      state='stand';
       if(now-upT>MIN_UP_MS && now-lastRepT>MIN_REP_MS){ lastRepT=now; addRep(); }
     }
   }
@@ -377,17 +393,22 @@ async function doInstall(){
     ev.prompt();
     const choice=await ev.userChoice;
     hideBanner(choice.outcome!=='accepted');
+    $('installBtn').classList.add('hidden');  // the browser's prompt is single-use
     if(choice.outcome==='accepted') setMsg('Installing… look for Sit-Up Alarm on your home screen.');
+  }else if(isIOS){
+    showManualSteps();                       // Apple doesn't allow one-tap install
   }else{
-    showManualSteps();                       // iPhone / browsers without an install prompt
+    setMsg('Install is not available in this browser right now. Open this page in Chrome over HTTPS.');
   }
 }
 
-if(isStandalone){ $('installBtn').classList.add('hidden'); }
-else if(isIOS){ setTimeout(showBanner,1200); }             // iOS has no install event, so we show the steps
+// Android/desktop: the Install button only appears once the browser says one-tap install is possible
+if(isStandalone || !isIOS) $('installBtn').classList.add('hidden');
+if(!isStandalone && isIOS) setTimeout(showBanner,1200);    // iOS has no install event, so we show the steps
 
 window.addEventListener('beforeinstallprompt',e=>{
   e.preventDefault(); deferredInstall=e;
+  if(!isStandalone) $('installBtn').classList.remove('hidden');
   setTimeout(showBanner,800);                               // ask once the page has loaded
 });
 window.addEventListener('appinstalled',()=>{
